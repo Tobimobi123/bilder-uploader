@@ -1,20 +1,19 @@
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <GxEPD2_BW.h>
-#include <GxEPD2_3C.h>
+#include "GxEPD2_display_selection_new_style.h"
 #include <SPI.h>
-#include <SD.h>
 
-// Displayklasse für 4.26" 800x480 (GD7965)
-// #include <GxEPD2_750_T7.h>
-GxEPD2_BW<GxEPD2_750_T7, GxEPD2_750_T7::HEIGHT> display(GxEPD2_750_T7(15, 27, 26, 25));
-
-// WLAN-Zugang
+// ✅ WLAN-Zugangsdaten
 const char* ssid     = "404 network unavailable";
 const char* password = "Albert0905!";
 
-// URL zum BMP
-const char* imageUrl = "https://res.cloudinary.com/dsmcpyraq/image/upload/latest.bmp";
+// ✅ Feste Cloudinary-URL deines .bmp-Bildes (ohne Cache!)
+const char* imageUrl = "https://bilder-uploader-five.vercel.app/latest.bmp";
+
+// ⏱️ Zeitsteuerung: 1x pro Stunde abrufen
+unsigned long lastFetch = 0;
+const unsigned long fetchInterval = 60UL * 60UL * 1000UL; // 1 Stunde
 
 void setup()
 {
@@ -25,20 +24,28 @@ void setup()
     delay(500);
     Serial.print(".");
   }
-  Serial.println("\n✅ WLAN verbunden");
+  Serial.println("\n✅ WLAN verbunden.");
 
   display.init();
-  display.setRotation(1);
+  display.setRotation(1); // Querformat
 
   fetchAndDisplayBMP();
 }
 
-void loop() {
-  // Nur einmal anzeigen
+void loop()
+{
+  if (millis() - lastFetch > fetchInterval) {
+    fetchAndDisplayBMP();
+  }
+  delay(1000);
 }
 
 void fetchAndDisplayBMP()
 {
+  lastFetch = millis();
+
+  if (WiFi.status() != WL_CONNECTED) return;
+
   HTTPClient http;
   http.begin(imageUrl);
   int httpCode = http.GET();
@@ -47,43 +54,34 @@ void fetchAndDisplayBMP()
     WiFiClient* stream = http.getStreamPtr();
 
     // BMP Header überspringen
-    uint8_t bmpHeader[54];
-    stream->readBytes(bmpHeader, 54);
-    if (bmpHeader[0] != 'B' || bmpHeader[1] != 'M') {
-      Serial.println("❌ Kein gültiger BMP Header!");
-      return;
-    }
+    byte header[54];
+    stream->readBytes(header, 54);
 
-    // Bilddaten-Offset (normal 54)
-    uint32_t dataOffset = *(uint32_t*)&bmpHeader[10];
-    uint32_t width = *(uint32_t*)&bmpHeader[18];
-    uint32_t height = *(uint32_t*)&bmpHeader[22];
-    uint16_t bpp = *(uint16_t*)&bmpHeader[28];
-
-    if (bpp != 1 || width != 800 || height != 480) {
-      Serial.printf("❌ Format nicht unterstützt: %dx%d, %d bpp\n", width, height, bpp);
-      return;
-    }
-
-    // Rest bis Datenanfang überspringen
-    stream->readBytes(nullptr, dataOffset - 54);
+    // Breite/Höhe auslesen (nur zur Kontrolle)
+    int width  = header[18] + (header[19] << 8);
+    int height = header[22] + (header[23] << 8);
+    Serial.printf("🖼️ Bildgröße: %dx%d\n", width, height);
 
     display.setFullWindow();
     display.firstPage();
     do {
-      for (int y = height - 1; y >= 0; y--) { // BMP ist von unten nach oben
-        for (int x = 0; x < width; x += 8) {
+      for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width / 8; x++) {
           if (stream->available()) {
-            uint8_t byte = stream->read();
-            display.drawBitmap(x, y, &byte, 8, 1, GxEPD_BLACK);
+            uint8_t b = stream->read();
+            display.drawBitmap(x * 8, height - 1 - y, &b, 8, 1, GxEPD_BLACK); // Umgedreht, da BMP von unten nach oben
+          } else {
+            Serial.printf("❌ Zu wenig Daten bei Zeile %d\n", y);
+            break;
           }
         }
       }
     } while (display.nextPage());
 
-    Serial.println("✅ Bildanzeige abgeschlossen");
+    Serial.println("✅ Bildanzeige abgeschlossen.");
   } else {
-    Serial.printf("❌ HTTP Fehler: %d\n", httpCode);
+    Serial.print("❌ HTTP Fehler: ");
+    Serial.println(httpCode);
   }
 
   http.end();
